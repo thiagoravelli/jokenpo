@@ -287,8 +287,7 @@
             clearInterval(interval);
             showGameScreen();
             startChoiceCountdown(3, () => {
-              // After move countdown, determine round result.
-              // For any player who didn't choose, assign "X"
+              // After move countdown, assign 'X' for any missing choice.
               Object.keys(gameState.players).forEach(id => {
                 if (!gameState.choices[id]) {
                   gameState.choices[id] = 'X';
@@ -307,7 +306,6 @@
       // Update player slots
       if (playerIds.length > 0) {
         document.getElementById('player1Name').textContent = gameState.players[playerIds[0]].name;
-        // Show tick green only if ready AND an opponent exists; else gray.
         document.getElementById('player1Tick').textContent =
           (gameState.players[playerIds[0]].ready && playerIds.length === 2) ? "✓" : "✗";
       }
@@ -323,7 +321,6 @@
         readyButton.style.backgroundColor = '#888';
       } else {
         readyButton.disabled = false;
-        // If current player is ready, button turns yellow, else green.
         readyButton.style.backgroundColor = gameState.players[peer.id]?.ready ? 'yellow' : 'green';
       }
       // Update Leave button: disable if current player is ready.
@@ -345,7 +342,6 @@
       document.getElementById('gameRoom').style.display = 'block';
       document.getElementById('gameScreen').style.display = 'none';
       document.getElementById('leaveButton').onclick = leaveGame;
-      // Set ready button action
       const readyButton = document.getElementById('readyButton');
       readyButton.onclick = toggleReady;
       updateGameUI();
@@ -356,14 +352,16 @@
       document.getElementById('gameRoom').style.display = 'none';
       const gameScreen = document.getElementById('gameScreen');
       gameScreen.style.display = 'block';
+      // Removed the "disabled" attribute from choice buttons so players can select a move.
       gameScreen.innerHTML = `
         <button id="leaveButton">Leave</button>
         <div id="gameHeader">
-          <div id="roundCountdown">3</div>
+          <div id="roundCountdown">Choose your move: 3</div>
+          <div id="roundResult" style="font-size: 1.5rem; color: red; margin: 1rem;"></div>
           <div class="choices">
-            <button class="choice" data-choice="rock" disabled>✊</button>
-            <button class="choice" data-choice="paper" disabled>✋</button>
-            <button class="choice" data-choice="scissors" disabled>✌️</button>
+            <button class="choice" data-choice="rock">✊</button>
+            <button class="choice" data-choice="paper">✋</button>
+            <button class="choice" data-choice="scissors">✌️</button>
           </div>
           <div id="scoreDisplay">
             <span id="score1">${gameState.scores.player1}</span> - <span id="score2">${gameState.scores.player2}</span>
@@ -373,20 +371,21 @@
       document.getElementById('leaveButton').onclick = leaveGame;
       document.querySelectorAll('.choice').forEach(button => {
         button.onclick = () => {
-          // When a choice is made, disable buttons and record the move.
+          // Disable buttons after a choice is made.
           document.querySelectorAll('.choice').forEach(btn => btn.disabled = true);
           sendData('choice', { id: peer.id, choice: button.dataset.choice });
           gameState.choices[peer.id] = button.dataset.choice;
-          // Immediately check if both choices are in.
           determineRoundWinner();
         };
       });
     }
 
-    // Countdown for move selection (3 seconds) with message updates.
+    // Countdown for move selection (3 seconds)
     function startChoiceCountdown(seconds, callback) {
       let remaining = seconds;
       const countdownEl = document.getElementById('roundCountdown');
+      // Ensure choices are enabled at the start.
+      document.querySelectorAll('.choice').forEach(btn => btn.disabled = false);
       const interval = setInterval(() => {
         countdownEl.textContent = "Choose your move: " + remaining;
         remaining--;
@@ -400,17 +399,13 @@
     // Determine the winner of the round and update scores.
     function determineRoundWinner() {
       const ids = Object.keys(gameState.choices);
-      // Wait until both players have a choice.
-      if (ids.length < 2) return;
+      if (ids.length < 2) return; // Wait until both choices are in.
       const [id1, id2] = ids;
       const choice1 = gameState.choices[id1];
       const choice2 = gameState.choices[id2];
 
-      // Function to decide outcome given two moves.
       function roundOutcome(moveA, moveB) {
-        // If a player didn't choose, it should be 'X'
         if (moveA === moveB) return "tie";
-        // 'X' loses to any valid move and ties with 'X'
         if (moveA === 'X') return "lose";
         if (moveB === 'X') return "win";
         if (
@@ -425,10 +420,12 @@
       }
 
       let result = roundOutcome(choice1, choice2);
+      // Instead of using alert(), show the message as in-game text.
+      const roundResultEl = document.getElementById('roundResult');
       if (result === "tie") {
-        alert("Round tied! Replay round.");
+        roundResultEl.textContent = "Round tied! Replay round.";
+        setTimeout(() => { roundResultEl.textContent = ""; }, 2000);
       } else {
-        // Determine which peer gets the point.
         if ((result === "win" && id1 === peer.id) || (result === "lose" && id2 === peer.id)) {
           gameState.scores.player1++;
         } else {
@@ -436,11 +433,9 @@
         }
       }
       updateScoreUI();
-      // Check if a player has reached 2 points.
       if (gameState.scores.player1 >= 2 || gameState.scores.player2 >= 2) {
         endGame();
       } else {
-        // Reset choices and begin new round after 5 seconds.
         gameState.choices = {};
         document.getElementById('countdown').textContent = "Next round in 5 seconds";
         setTimeout(() => {
