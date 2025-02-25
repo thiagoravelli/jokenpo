@@ -22,6 +22,11 @@
       position: relative;
       transition: opacity 0.5s ease;
     }
+    #roomCodeDisplay {
+      font-size: 1.2rem;
+      margin-bottom: 1rem;
+      font-weight: bold;
+    }
     .playerSlot {
       margin: 1rem;
       padding: 1rem;
@@ -97,6 +102,7 @@
   <!-- Game Room -->
   <div id="gameRoom" style="display:none;">
     <button id="leaveButton">Leave</button>
+    <div id="roomCodeDisplay"></div>
     <div class="playerSlot">
       <span id="player1Name"></span>
       <div class="tick" id="player1Tick">✗</div>
@@ -132,10 +138,13 @@
       peer.on('open', id => {
         if (creatingGame) {
           isHost = true;
-          // Use the last 6 characters of the peer ID as room code
           const roomCode = id.slice(-6);
           console.log("Room created with code:", roomCode);
           showGameRoom();
+          // Display room code for host and add host info to gameState
+          document.getElementById('roomCodeDisplay').textContent = "Room Code: " + roomCode;
+          gameState.players[peer.id] = { name: userName, ready: false };
+          updateGameUI();
         }
       });
       peer.on('connection', connection => {
@@ -198,6 +207,7 @@
       });
 
       conn.on('open', () => {
+        // For guests, send player info upon connection
         sendPlayerInfo();
         showGameRoom();
       });
@@ -345,7 +355,6 @@
         (choice1 === 'paper' && choice2 === 'rock') ||
         (choice1 === 'scissors' && choice2 === 'paper')
       ) {
-        // Award win based on local peer versus opponent
         if (id1 === peer.id) {
           gameState.scores.player1++;
         } else {
@@ -360,11 +369,9 @@
       }
       updateScoreUI();
 
-      // End game if a player reaches 2 wins (best of 3)
       if (gameState.scores.player1 >= 2 || gameState.scores.player2 >= 2) {
         endGame();
       } else {
-        // Reset round choices and start next countdown
         gameState.choices = {};
         startCountdown(3, () => {
           document.querySelectorAll('.choice').forEach(btn => btn.disabled = false);
