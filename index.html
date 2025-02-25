@@ -34,20 +34,22 @@
       border-radius: 5px;
       display: flex;
       align-items: center;
-      gap: 1rem;
+      justify-content: space-between;
     }
     .tick {
-      color: #888;
       font-weight: bold;
+      padding: 0 0.5rem;
     }
     #readyButton {
       margin-top: 1rem;
       padding: 0.5rem 2rem;
       font-size: 1.1rem;
       cursor: pointer;
+      border: none;
+      border-radius: 5px;
     }
     #countdown {
-      font-size: 2rem;
+      font-size: 1.8rem;
       margin: 1rem;
     }
     .choice {
@@ -126,30 +128,45 @@
     let conn = null;
     let userName = "";
     let isHost = false;
+    let currentRoomCode = "";
     let gameState = {
-      players: {},
-      choices: {},
+      players: {}, // { peerId: { name, ready } }
+      choices: {}, // { peerId: 'rock' | 'paper' | 'scissors' | 'X' }
       scores: { player1: 0, player2: 0 }
     };
 
-    // Initialize PeerJS connection
+    // Generate a random 6-digit hexadecimal code
+    function generateRoomCode() {
+      return Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0').toUpperCase();
+    }
+
+    // Initialize PeerJS connection – if creating game, use generated room code as Peer ID
     function initPeer(creatingGame) {
-      peer = new Peer();
+      if (creatingGame) {
+        currentRoomCode = generateRoomCode();
+        peer = new Peer(currentRoomCode);
+      } else {
+        peer = new Peer();
+      }
       peer.on('open', id => {
         if (creatingGame) {
           isHost = true;
-          const roomCode = id.slice(-6);
-          console.log("Room created with code:", roomCode);
-          showGameRoom();
-          // Display room code for host and add host info to gameState
-          document.getElementById('roomCodeDisplay').textContent = "Room Code: " + roomCode;
+          console.log("Room created with code:", currentRoomCode);
+          document.getElementById('roomCodeDisplay').textContent = "Room Code: " + currentRoomCode;
           gameState.players[peer.id] = { name: userName, ready: false };
           updateGameUI();
+          showGameRoom();
         }
       });
+      // Only allow one connection – if already connected, reject extra ones.
       peer.on('connection', connection => {
-        conn = connection;
-        setupConnection();
+        if (conn) {
+          connection.send({ type: 'leave', payload: { message: 'full room' } });
+          connection.close();
+        } else {
+          conn = connection;
+          setupConnection();
+        }
       });
       peer.on('error', err => handlePeerError(err));
     }
@@ -163,11 +180,20 @@
     // Join game flow (guest)
     function joinGame() {
       if (!validateName()) return;
-      const code = document.getElementById('roomCode').value;
+      const code = document.getElementById('roomCode').value.trim().toUpperCase();
       if (!validateCode(code)) return;
       initPeer(false);
       peer.on('open', id => {
         conn = peer.connect(code);
+        conn.on('error', err => {
+          // If connection error, show invalid code or full room message.
+          if (err.type === 'peer-unavailable') {
+            showRoomError("Invalid code");
+          } else {
+            showRoomError("Room is full");
+          }
+          resetConnection();
+        });
         setupConnection();
       });
     }
@@ -176,14 +202,21 @@
     function setupConnection() {
       conn.on('data', data => {
         switch (data.type) {
-          case 'playerInfo':
-            // Update opponent's info
+          case 'playerInfo': {
+            // Update opponent's info if room not full
             const { name, id } = data.payload;
+            // If already two players, reject.
+            if (Object.keys(gameState.players).length >= 2) {
+              conn.send({ type: 'leave', payload: { message: 'full room' } });
+              conn.close();
+              showRoomError("Room is full");
+              return;
+            }
             gameState.players[id] = { name: name, ready: false };
             updateGameUI();
             break;
-          case 'ready':
-            // Update opponent ready state
+          }
+          case 'ready': {
             const { id: readyId, ready } = data.payload;
             if (gameState.players[readyId]) {
               gameState.players[readyId].ready = ready;
@@ -191,84 +224,112 @@
             updateGameUI();
             checkStartGame();
             break;
-          case 'choice':
-            // Record opponent's choice and check round result
+          }
+          case 'choice': {
             const { id: choiceId, choice } = data.payload;
             gameState.choices[choiceId] = choice;
             determineRoundWinner();
             break;
-          case 'leave':
-            showRoomError("Opponent left the game");
+          }
+          case 'leave': {
+            showRoomError(data.payload.message || "Opponent left the game");
             leaveGame();
             break;
+          }
           default:
             console.log("Unknown data type:", data.type);
         }
       });
-
       conn.on('open', () => {
-        // For guests, send player info upon connection
+        // When connection opens, send own player info.
         sendPlayerInfo();
         showGameRoom();
       });
       conn.on('error', err => handlePeerError(err));
     }
 
-    // Send data over the PeerJS connection
+    // Send data over PeerJS connection
     function sendData(type, payload = {}) {
       if (conn && conn.open) {
         conn.send({ type, payload });
       }
     }
 
-    // Send player's information
+    // Send player's info to opponent
     function sendPlayerInfo() {
       sendData('playerInfo', { name: userName, id: peer.id });
       gameState.players[peer.id] = { name: userName, ready: false };
       updateGameUI();
     }
 
-    // Toggle ready state and notify opponent
+    // Toggle ready state – but only allow toggling if room has 2 players.
     function toggleReady() {
+      if (Object.keys(gameState.players).length < 2) return;
       const currentReady = gameState.players[peer.id]?.ready || false;
       const newReady = !currentReady;
       gameState.players[peer.id].ready = newReady;
       sendData('ready', { id: peer.id, ready: newReady });
-      const readyButton = document.getElementById('readyButton');
-      readyButton.style.backgroundColor = newReady ? '#4CAF50' : '#888';
       updateGameUI();
       checkStartGame();
     }
 
-    // Check if both players are ready to start the game
+    // Check if both players are ready to start the game and begin a 5-second countdown
     function checkStartGame() {
       const playerIds = Object.keys(gameState.players);
       if (playerIds.length === 2 && playerIds.every(id => gameState.players[id].ready)) {
-        showGameScreen();
-        startCountdown(3, () => {
-          // Enable choice buttons once countdown completes
-          document.querySelectorAll('.choice').forEach(btn => btn.disabled = false);
-        });
+        // 5-second countdown before game begins.
+        let seconds = 5;
+        const countdownEl = document.getElementById('countdown');
+        const interval = setInterval(() => {
+          countdownEl.textContent = "The game will begin in " + seconds + " seconds";
+          seconds--;
+          if (seconds < 0) {
+            clearInterval(interval);
+            showGameScreen();
+            startChoiceCountdown(3, () => {
+              // After move countdown, determine round result.
+              // For any player who didn't choose, assign "X"
+              Object.keys(gameState.players).forEach(id => {
+                if (!gameState.choices[id]) {
+                  gameState.choices[id] = 'X';
+                }
+              });
+              determineRoundWinner();
+            });
+          }
+        }, 1000);
       }
     }
 
-    // Update the Game Room UI with player names and ready ticks
+    // Update the Game Room UI
     function updateGameUI() {
       const playerIds = Object.keys(gameState.players);
+      // Update player slots
       if (playerIds.length > 0) {
         document.getElementById('player1Name').textContent = gameState.players[playerIds[0]].name;
-        document.getElementById('player1Tick').textContent = gameState.players[playerIds[0]].ready ? "✓" : "✗";
+        // Show tick green only if ready AND an opponent exists; else gray.
+        document.getElementById('player1Tick').textContent =
+          (gameState.players[playerIds[0]].ready && playerIds.length === 2) ? "✓" : "✗";
       }
       if (playerIds.length > 1) {
         document.getElementById('player2Name').textContent = gameState.players[playerIds[1]].name;
-        document.getElementById('player2Tick').textContent = gameState.players[playerIds[1]].ready ? "✓" : "✗";
+        document.getElementById('player2Tick').textContent =
+          (gameState.players[playerIds[1]].ready) ? "✓" : "✗";
       }
-    }
-
-    // Update score display in the game screen
-    function updateScoreUI() {
-      document.getElementById('score1').textContent = gameState.scores.player1;
-      document.getElementById('score2').textContent = gameState.scores.player2;
+      // Update Ready button:
+      const readyButton = document.getElementById('readyButton');
+      if (playerIds.length < 2) {
+        readyButton.disabled = true;
+        readyButton.style.backgroundColor = '#888';
+      } else {
+        readyButton.disabled = false;
+        // If current player is ready, button turns yellow, else green.
+        readyButton.style.backgroundColor = gameState.players[peer.id]?.ready ? 'yellow' : 'green';
+      }
+      // Update Leave button: disable if current player is ready.
+      const leaveButton = document.getElementById('leaveButton');
+      leaveButton.disabled = gameState.players[peer.id]?.ready;
+      leaveButton.style.cursor = leaveButton.disabled ? 'not-allowed' : 'pointer';
     }
 
     // Show Home Screen
@@ -284,9 +345,8 @@
       document.getElementById('gameRoom').style.display = 'block';
       document.getElementById('gameScreen').style.display = 'none';
       document.getElementById('leaveButton').onclick = leaveGame;
+      // Set ready button action
       const readyButton = document.getElementById('readyButton');
-      readyButton.style.backgroundColor = '#888';
-      readyButton.disabled = false;
       readyButton.onclick = toggleReady;
       updateGameUI();
     }
@@ -306,106 +366,131 @@
             <button class="choice" data-choice="scissors" disabled>✌️</button>
           </div>
           <div id="scoreDisplay">
-            <span id="score1">0</span> - <span id="score2">0</span>
+            <span id="score1">${gameState.scores.player1}</span> - <span id="score2">${gameState.scores.player2}</span>
           </div>
         </div>
       `;
       document.getElementById('leaveButton').onclick = leaveGame;
       document.querySelectorAll('.choice').forEach(button => {
-        button.onclick = () => makeChoice(button.dataset.choice);
+        button.onclick = () => {
+          // When a choice is made, disable buttons and record the move.
+          document.querySelectorAll('.choice').forEach(btn => btn.disabled = true);
+          sendData('choice', { id: peer.id, choice: button.dataset.choice });
+          gameState.choices[peer.id] = button.dataset.choice;
+          // Immediately check if both choices are in.
+          determineRoundWinner();
+        };
       });
     }
 
-    // Start a countdown and call callback when finished
-    function startCountdown(seconds, callback) {
+    // Countdown for move selection (3 seconds) with message updates.
+    function startChoiceCountdown(seconds, callback) {
       let remaining = seconds;
-      const countdownElement = document.getElementById(isHost ? 'countdown' : 'roundCountdown');
-      countdownElement.textContent = remaining;
+      const countdownEl = document.getElementById('roundCountdown');
       const interval = setInterval(() => {
+        countdownEl.textContent = "Choose your move: " + remaining;
         remaining--;
-        countdownElement.textContent = remaining;
-        if (remaining <= 0) {
+        if (remaining < 0) {
           clearInterval(interval);
           callback();
         }
       }, 1000);
     }
 
-    // Handle player's choice and notify opponent
-    function makeChoice(choice) {
-      document.querySelectorAll('.choice').forEach(btn => btn.disabled = true);
-      sendData('choice', { id: peer.id, choice });
-      gameState.choices[peer.id] = choice;
-      determineRoundWinner();
-    }
-
-    // Determine the winner of the round and update scores
+    // Determine the winner of the round and update scores.
     function determineRoundWinner() {
       const ids = Object.keys(gameState.choices);
-      if (ids.length < 2) return; // Wait for both choices
-
+      // Wait until both players have a choice.
+      if (ids.length < 2) return;
       const [id1, id2] = ids;
       const choice1 = gameState.choices[id1];
       const choice2 = gameState.choices[id2];
 
-      if (choice1 === choice2) {
-        alert("It's a tie! Replay round.");
-      } else if (
-        (choice1 === 'rock' && choice2 === 'scissors') ||
-        (choice1 === 'paper' && choice2 === 'rock') ||
-        (choice1 === 'scissors' && choice2 === 'paper')
-      ) {
-        if (id1 === peer.id) {
-          gameState.scores.player1++;
+      // Function to decide outcome given two moves.
+      function roundOutcome(moveA, moveB) {
+        // If a player didn't choose, it should be 'X'
+        if (moveA === moveB) return "tie";
+        // 'X' loses to any valid move and ties with 'X'
+        if (moveA === 'X') return "lose";
+        if (moveB === 'X') return "win";
+        if (
+          (moveA === 'rock' && moveB === 'scissors') ||
+          (moveA === 'paper' && moveB === 'rock') ||
+          (moveA === 'scissors' && moveB === 'paper')
+        ) {
+          return "win";
         } else {
-          gameState.scores.player2++;
+          return "lose";
         }
+      }
+
+      let result = roundOutcome(choice1, choice2);
+      if (result === "tie") {
+        alert("Round tied! Replay round.");
       } else {
-        if (id2 === peer.id) {
+        // Determine which peer gets the point.
+        if ((result === "win" && id1 === peer.id) || (result === "lose" && id2 === peer.id)) {
           gameState.scores.player1++;
         } else {
           gameState.scores.player2++;
         }
       }
       updateScoreUI();
-
+      // Check if a player has reached 2 points.
       if (gameState.scores.player1 >= 2 || gameState.scores.player2 >= 2) {
         endGame();
       } else {
+        // Reset choices and begin new round after 5 seconds.
         gameState.choices = {};
-        startCountdown(3, () => {
-          document.querySelectorAll('.choice').forEach(btn => btn.disabled = false);
-        });
+        document.getElementById('countdown').textContent = "Next round in 5 seconds";
+        setTimeout(() => {
+          showGameScreen();
+          startChoiceCountdown(3, () => {
+            Object.keys(gameState.players).forEach(id => {
+              if (!gameState.choices[id]) {
+                gameState.choices[id] = 'X';
+              }
+            });
+            determineRoundWinner();
+          });
+        }, 5000);
       }
     }
 
-    // End the game and display the winner
+    // Update score display in the game screen.
+    function updateScoreUI() {
+      if(document.getElementById('score1') && document.getElementById('score2')) {
+        document.getElementById('score1').textContent = gameState.scores.player1;
+        document.getElementById('score2').textContent = gameState.scores.player2;
+      }
+    }
+
+    // End the game and display the winner.
     function endGame() {
       const playerIds = Object.keys(gameState.players);
-      const winner = gameState.scores.player1 >= 2 ?
-                     gameState.players[playerIds[0]].name :
-                     gameState.players[playerIds[1]].name;
+      let winnerName = "";
+      if (gameState.scores.player1 >= 2) {
+        winnerName = gameState.players[playerIds[0]].name;
+      } else {
+        winnerName = gameState.players[playerIds[1]].name;
+      }
       const gameScreen = document.getElementById('gameScreen');
       gameScreen.innerHTML = `
         <h2>Game Over!</h2>
-        <p>Winner: ${winner}</p>
+        <p>Winner: ${winnerName}</p>
         <button onclick="leaveGame()">Leave</button>
       `;
     }
 
-    // Leave the game and reset connection and state
+    // Leave the game and reset connection and state.
     function leaveGame() {
       if (conn && conn.open) sendData('leave');
       resetConnection();
-      gameState = {
-        players: {},
-        choices: {},
-        scores: { player1: 0, player2: 0 }
-      };
+      gameState = { players: {}, choices: {}, scores: { player1: 0, player2: 0 } };
       showHomeScreen();
     }
 
-    // Reset PeerJS connection
+    // Reset PeerJS connection.
     function resetConnection() {
       if (conn) conn.close();
       if (peer) peer.destroy();
@@ -414,21 +499,21 @@
       isHost = false;
     }
 
-    // Handle PeerJS errors and display messages
+    // Handle PeerJS errors.
     function handlePeerError(err) {
       console.error('Peer error:', err);
       showRoomError(`Connection error: ${err.type || err}`);
       resetConnection();
     }
 
-    // Display room errors temporarily
+    // Display room errors temporarily.
     function showRoomError(message) {
       const errorElement = document.getElementById('roomError');
       errorElement.textContent = message;
       setTimeout(() => errorElement.textContent = '', 3000);
     }
 
-    // Validate the player's name
+    // Validate the player's name.
     function validateName() {
       const name = document.getElementById('nameInput').value.trim();
       if (!name) {
@@ -443,16 +528,16 @@
       return true;
     }
 
-    // Validate the room code (6 hex characters)
+    // Validate the room code (must be 6 hex digits).
     function validateCode(code) {
-      if (!/^[0-9A-Fa-f]{6}$/.test(code)) {
+      if (!/^[0-9A-F]{6}$/.test(code)) {
         showRoomError("Invalid room code");
         return false;
       }
       return true;
     }
 
-    // Clear name error when user types
+    // Clear name error when the user types.
     document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('nameInput').addEventListener('input', () => {
         document.getElementById('nameError').textContent = '';
