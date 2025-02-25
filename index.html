@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Jokenpo Online</title>
+  <style>
+    /* Basic styling and responsiveness */
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #f0f0f0;
+    }
+    #homeScreen, #gameRoom, #gameScreen {
+      background: white;
+      padding: 2rem;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+      text-align: center;
+      position: relative;
+      transition: opacity 0.5s ease;
+    }
+    .playerSlot {
+      margin: 1rem;
+      padding: 1rem;
+      border: 2px solid #ddd;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .tick {
+      color: #888;
+      font-weight: bold;
+    }
+    #readyButton {
+      margin-top: 1rem;
+      padding: 0.5rem 2rem;
+      font-size: 1.1rem;
+      cursor: pointer;
+    }
+    #countdown {
+      font-size: 2rem;
+      margin: 1rem;
+    }
+    .choice {
+      font-size: 3rem;
+      padding: 1rem;
+      margin: 0.5rem;
+      cursor: pointer;
+      background: none;
+      border: 2px solid #ddd;
+      border-radius: 10px;
+    }
+    .choice:hover {
+      background: #f0f0f0;
+    }
+    #leaveButton {
+      position: absolute;
+      top: 1rem;
+      left: 1rem;
+      padding: 0.5rem 1rem;
+      background: #ff4444;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    /* Responsive adjustments */
+    @media (max-width: 600px) {
+      #homeScreen, #gameRoom, #gameScreen {
+        width: 90%;
+        padding: 1rem;
+      }
+      .choice {
+        font-size: 2rem;
+        padding: 0.5rem;
+      }
+    }
+  </style>
+  <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <!-- Home Screen -->
+  <div id="homeScreen">
+    <input type="text" id="nameInput" placeholder="Your name">
+    <div id="nameError" style="color: red;"></div>
+    <button onclick="createGame()">Create Game</button>
+    <br>
+    <input type="text" id="roomCode" placeholder="Room code">
+    <button onclick="joinGame()">Join Game</button>
+    <div id="roomError" style="color: red;"></div>
+  </div>
+
+  <!-- Game Room -->
+  <div id="gameRoom" style="display:none;">
+    <button id="leaveButton">Leave</button>
+    <div class="playerSlot">
+      <span id="player1Name"></span>
+      <div class="tick" id="player1Tick">✗</div>
+    </div>
+    <div class="playerSlot">
+      <span id="player2Name"></span>
+      <div class="tick" id="player2Tick">✗</div>
+    </div>
+    <button id="readyButton">Ready</button>
+    <div id="countdown"></div>
+  </div>
+
+  <!-- Game Screen -->
+  <div id="gameScreen" style="display:none;">
+    <!-- Game elements will be injected here -->
+  </div>
+
+  <script>
+    // Global variables and game state
+    let peer = null;
+    let conn = null;
+    let userName = "";
+    let isHost = false;
+    let gameState = {
+      players: {},
+      choices: {},
+      scores: { player1: 0, player2: 0 }
+    };
+
+    // Initialize PeerJS connection
+    function initPeer(creatingGame) {
+      peer = new Peer();
+      peer.on('open', id => {
+        if (creatingGame) {
+          isHost = true;
+          // Use the last 6 characters of the peer ID as room code
+          const roomCode = id.slice(-6);
+          console.log("Room created with code:", roomCode);
+          showGameRoom();
+        }
+      });
+      peer.on('connection', connection => {
+        conn = connection;
+        setupConnection();
+      });
+      peer.on('error', err => handlePeerError(err));
+    }
+
+    // Create game flow (host)
+    function createGame() {
+      if (!validateName()) return;
+      initPeer(true);
+    }
+
+    // Join game flow (guest)
+    function joinGame() {
+      if (!validateName()) return;
+      const code = document.getElementById('roomCode').value;
+      if (!validateCode(code)) return;
+      initPeer(false);
+      peer.on('open', id => {
+        conn = peer.connect(code);
+        setupConnection();
+      });
+    }
+
+    // Setup connection event handlers
+    function setupConnection() {
+      conn.on('data', data => {
+        switch (data.type) {
+          case 'playerInfo':
+            // Update opponent's info
+            const { name, id } = data.payload;
+            gameState.players[id] = { name: name, ready: false };
+            updateGameUI();
+            break;
+          case 'ready':
+            // Update opponent ready state
+            const { id: readyId, ready } = data.payload;
+            if (gameState.players[readyId]) {
+              gameState.players[readyId].ready = ready;
+            }
+            updateGameUI();
+            checkStartGame();
+            break;
+          case 'choice':
+            // Record opponent's choice and check round result
+            const { id: choiceId, choice } = data.payload;
+            gameState.choices[choiceId] = choice;
+            determineRoundWinner();
+            break;
+          case 'leave':
+            showRoomError("Opponent left the game");
+            leaveGame();
+            break;
+          default:
+            console.log("Unknown data type:", data.type);
+        }
+      });
+
+      conn.on('open', () => {
+        sendPlayerInfo();
+        showGameRoom();
+      });
+      conn.on('error', err => handlePeerError(err));
+    }
+
+    // Send data over the PeerJS connection
+    function sendData(type, payload = {}) {
+      if (conn && conn.open) {
+        conn.send({ type, payload });
+      }
+    }
+
+    // Send player's information
+    function sendPlayerInfo() {
+      sendData('playerInfo', { name: userName, id: peer.id });
+      gameState.players[peer.id] = { name: userName, ready: false };
+      updateGameUI();
+    }
+
+    // Toggle ready state and notify opponent
+    function toggleReady() {
+      const currentReady = gameState.players[peer.id]?.ready || false;
+      const newReady = !currentReady;
+      gameState.players[peer.id].ready = newReady;
+      sendData('ready', { id: peer.id, ready: newReady });
+      const readyButton = document.getElementById('readyButton');
+      readyButton.style.backgroundColor = newReady ? '#4CAF50' : '#888';
+      updateGameUI();
+      checkStartGame();
+    }
+
+    // Check if both players are ready to start the game
+    function checkStartGame() {
+      const playerIds = Object.keys(gameState.players);
+      if (playerIds.length === 2 && playerIds.every(id => gameState.players[id].ready)) {
+        showGameScreen();
+        startCountdown(3, () => {
+          // Enable choice buttons once countdown completes
+          document.querySelectorAll('.choice').forEach(btn => btn.disabled = false);
+        });
+      }
+    }
+
+    // Update the Game Room UI with player names and ready ticks
+    function updateGameUI() {
+      const playerIds = Object.keys(gameState.players);
+      if (playerIds.length > 0) {
+        document.getElementById('player1Name').textContent = gameState.players[playerIds[0]].name;
+        document.getElementById('player1Tick').textContent = gameState.players[playerIds[0]].ready ? "✓" : "✗";
+      }
+      if (playerIds.length > 1) {
+        document.getElementById('player2Name').textContent = gameState.players[playerIds[1]].name;
+        document.getElementById('player2Tick').textContent = gameState.players[playerIds[1]].ready ? "✓" : "✗";
+      }
+    }
+
+    // Update score display in the game screen
+    function updateScoreUI() {
+      document.getElementById('score1').textContent = gameState.scores.player1;
+      document.getElementById('score2').textContent = gameState.scores.player2;
+    }
+
+    // Show Home Screen
+    function showHomeScreen() {
+      document.getElementById('homeScreen').style.display = 'block';
+      document.getElementById('gameRoom').style.display = 'none';
+      document.getElementById('gameScreen').style.display = 'none';
+    }
+
+    // Show Game Room
+    function showGameRoom() {
+      document.getElementById('homeScreen').style.display = 'none';
+      document.getElementById('gameRoom').style.display = 'block';
+      document.getElementById('gameScreen').style.display = 'none';
+      document.getElementById('leaveButton').onclick = leaveGame;
+      const readyButton = document.getElementById('readyButton');
+      readyButton.style.backgroundColor = '#888';
+      readyButton.disabled = false;
+      readyButton.onclick = toggleReady;
+      updateGameUI();
+    }
+
+    // Show Game Screen and initialize round UI
+    function showGameScreen() {
+      document.getElementById('gameRoom').style.display = 'none';
+      const gameScreen = document.getElementById('gameScreen');
+      gameScreen.style.display = 'block';
+      gameScreen.innerHTML = `
+        <button id="leaveButton">Leave</button>
+        <div id="gameHeader">
+          <div id="roundCountdown">3</div>
+          <div class="choices">
+            <button class="choice" data-choice="rock" disabled>✊</button>
+            <button class="choice" data-choice="paper" disabled>✋</button>
+            <button class="choice" data-choice="scissors" disabled>✌️</button>
+          </div>
+          <div id="scoreDisplay">
+            <span id="score1">0</span> - <span id="score2">0</span>
+          </div>
+        </div>
+      `;
+      document.getElementById('leaveButton').onclick = leaveGame;
+      document.querySelectorAll('.choice').forEach(button => {
+        button.onclick = () => makeChoice(button.dataset.choice);
+      });
+    }
+
+    // Start a countdown and call callback when finished
+    function startCountdown(seconds, callback) {
+      let remaining = seconds;
+      const countdownElement = document.getElementById(isHost ? 'countdown' : 'roundCountdown');
+      countdownElement.textContent = remaining;
+      const interval = setInterval(() => {
+        remaining--;
+        countdownElement.textContent = remaining;
+        if (remaining <= 0) {
+          clearInterval(interval);
+          callback();
+        }
+      }, 1000);
+    }
+
+    // Handle player's choice and notify opponent
+    function makeChoice(choice) {
+      document.querySelectorAll('.choice').forEach(btn => btn.disabled = true);
+      sendData('choice', { id: peer.id, choice });
+      gameState.choices[peer.id] = choice;
+      determineRoundWinner();
+    }
+
+    // Determine the winner of the round and update scores
+    function determineRoundWinner() {
+      const ids = Object.keys(gameState.choices);
+      if (ids.length < 2) return; // Wait for both choices
+
+      const [id1, id2] = ids;
+      const choice1 = gameState.choices[id1];
+      const choice2 = gameState.choices[id2];
+
+      if (choice1 === choice2) {
+        alert("It's a tie! Replay round.");
+      } else if (
+        (choice1 === 'rock' && choice2 === 'scissors') ||
+        (choice1 === 'paper' && choice2 === 'rock') ||
+        (choice1 === 'scissors' && choice2 === 'paper')
+      ) {
+        // Award win based on local peer versus opponent
+        if (id1 === peer.id) {
+          gameState.scores.player1++;
+        } else {
+          gameState.scores.player2++;
+        }
+      } else {
+        if (id2 === peer.id) {
+          gameState.scores.player1++;
+        } else {
+          gameState.scores.player2++;
+        }
+      }
+      updateScoreUI();
+
+      // End game if a player reaches 2 wins (best of 3)
+      if (gameState.scores.player1 >= 2 || gameState.scores.player2 >= 2) {
+        endGame();
+      } else {
+        // Reset round choices and start next countdown
+        gameState.choices = {};
+        startCountdown(3, () => {
+          document.querySelectorAll('.choice').forEach(btn => btn.disabled = false);
+        });
+      }
+    }
+
+    // End the game and display the winner
+    function endGame() {
+      const playerIds = Object.keys(gameState.players);
+      const winner = gameState.scores.player1 >= 2 ?
+                     gameState.players[playerIds[0]].name :
+                     gameState.players[playerIds[1]].name;
+      const gameScreen = document.getElementById('gameScreen');
+      gameScreen.innerHTML = `
+        <h2>Game Over!</h2>
+        <p>Winner: ${winner}</p>
+        <button onclick="leaveGame()">Leave</button>
+      `;
+    }
+
+    // Leave the game and reset connection and state
+    function leaveGame() {
+      if (conn && conn.open) sendData('leave');
+      resetConnection();
+      gameState = {
+        players: {},
+        choices: {},
+        scores: { player1: 0, player2: 0 }
+      };
+      showHomeScreen();
+    }
+
+    // Reset PeerJS connection
+    function resetConnection() {
+      if (conn) conn.close();
+      if (peer) peer.destroy();
+      conn = null;
+      peer = null;
+      isHost = false;
+    }
+
+    // Handle PeerJS errors and display messages
+    function handlePeerError(err) {
+      console.error('Peer error:', err);
+      showRoomError(`Connection error: ${err.type || err}`);
+      resetConnection();
+    }
+
+    // Display room errors temporarily
+    function showRoomError(message) {
+      const errorElement = document.getElementById('roomError');
+      errorElement.textContent = message;
+      setTimeout(() => errorElement.textContent = '', 3000);
+    }
+
+    // Validate the player's name
+    function validateName() {
+      const name = document.getElementById('nameInput').value.trim();
+      if (!name) {
+        document.getElementById('nameError').textContent = "Please type a name";
+        return false;
+      }
+      if (name.length > 20) {
+        document.getElementById('nameError').textContent = "Name too long";
+        return false;
+      }
+      userName = name;
+      return true;
+    }
+
+    // Validate the room code (6 hex characters)
+    function validateCode(code) {
+      if (!/^[0-9A-Fa-f]{6}$/.test(code)) {
+        showRoomError("Invalid room code");
+        return false;
+      }
+      return true;
+    }
+
+    // Clear name error when user types
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('nameInput').addEventListener('input', () => {
+        document.getElementById('nameError').textContent = '';
+      });
+    });
+  </script>
+</body>
+</html>
